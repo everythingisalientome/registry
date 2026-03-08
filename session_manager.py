@@ -35,6 +35,7 @@ class AgentPool:
         logger.info(f"[{self.agent_type}] Mode: {self.session_mode} — Starting {self.warm_count} warm sessions...")
         for slot in range(1, self.warm_count + 1):
             await self._launch_session(slot, SessionType.WARM)
+            await asyncio.sleep(5)
         logger.info(f"[{self.agent_type}] All warm sessions ready.")
         asyncio.create_task(self._health_loop())
 
@@ -122,12 +123,15 @@ class AgentPool:
             **os.environ,
             "MCP_URL": f"http://localhost:{mcp_port}",
         }
+        agent_log_dir = os.path.dirname(os.path.abspath(self.agent_script))
+        stderr_log = open(os.path.join(agent_log_dir, f"agent_stderr_{agent_port}.log"), "w")
+        #stdout_log = open(os.path.join(agent_log_dir, f"agent_stdout_{agent_port}.log"), "w")
         session.agent_process = subprocess.Popen(
-            [self.agent_script, "--port", str(agent_port)],
+            [self.agent_script, "--port", str(agent_port), "--mcp-url", f"http://localhost:{mcp_port}"],
             cwd=agent_dir,
             env=env,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_log,
         )
         logger.info(f"[{self.agent_type}] Agent launched locally on port {agent_port}")
 
@@ -154,13 +158,16 @@ class AgentPool:
 
     async def _wait_for_health(self, session: Session):
         deadline = asyncio.get_event_loop().time() + self.startup_timeout
+        # Always health check via localhost — agent runs on same machine
+        health_url = f"http://localhost:{session.agent_port}/health"
         async with httpx.AsyncClient() as client:
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    r = await client.get(f"{session.agent_url}/health", timeout=2)
+                    r = await client.get(health_url, timeout=2)
                     if r.status_code == 200:
                         return
-                except Exception:
+                except Exception as e:
+                    logger.error(f"[{self.agent_type}] Health check failed for slot {session.slot} on port {session.agent_port}: {e}")
                     pass
                 await asyncio.sleep(1)
         raise TimeoutError(f"[{self.agent_type}] Slot {session.slot} did not become healthy in time.")
@@ -188,7 +195,8 @@ class AgentPool:
                         )
                         if r.status_code != 200:
                             raise Exception("Bad status")
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"[{self.agent_type}] Health check failed for slot {session.slot} on port {session.agent_port}: {e}")
                         logger.warning(f"[{self.agent_type}] Slot {session.slot} is dead, restarting...")
                         await self._kill_session(session)
                         await self._launch_session(session.slot, session.type)

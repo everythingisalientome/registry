@@ -5,7 +5,7 @@ agent_types:
     max_sessions: 10
     agent_script: "C:/agents/desktop_agent/desktop_agent.exe"
     mcp_binary: "C:/agents/GoogleSearchMcp/GoogleSearchMcp.exe"
-    session_launcher: "C:/agents/SessionLauncher/SessionLauncher.exe"
+    session_launcher: "C:/agents/SessionLauncher/launcher/SessionLauncher.exe"
     session_users:
       - "agent_user_1"
       - "agent_user_2"

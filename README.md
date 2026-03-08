@@ -119,6 +119,9 @@ cd D:\VisualStudioCodeWrkSpce\LLMs\registry
 
 Output: `dist\registry\registry.exe`
 
+
+cd D:\VisualStudioCodeWrkSpce\LLMs\registry
+.venv\Scripts\pyinstaller --onedir --name registry main.py --hidden-import session_manager --hidden-import models --add-binary "C:\Users\PreetPragyan\AppData\Local\Programs\Python\Python312\python312.dll;_internal"
 ---
 
 ## Run
