@@ -1,0 +1,18 @@
+agent_types:
+  desktop:
+    warm_sessions: 3
+    max_sessions: 10
+    agent_script: "C:/agents/desktop_agent/desktop_agent.exe"
+    mcp_binary: "C:/agents/GoogleSearchMcp/GoogleSearchMcp.exe"
+    session_launcher: "C:/agents/SessionLauncher/SessionLauncher.exe"
+    session_users:
+      - "agent_user_1"
+      - "agent_user_2"
+      - "agent_user_3"
+    agent_base_port: 8000
+    mcp_base_port: 5000
+    host: "192.168.0.135"
+
+health_check_interval_seconds: 30
+health_check_timeout_seconds: 5
+startup_timeout_seconds: 30

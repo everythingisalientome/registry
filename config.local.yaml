@@ -1,0 +1,28 @@
+agent_types:
+  desktop:
+    session_mode: "local"        # "local" or "rdsh"
+    warm_sessions: 3
+    max_sessions: 10
+    agent_script: "D:/VisualStudioCodeWrkSpce/LLMs/demo-desktop-agent/dist/desktop_agent/desktop_agent.exe"
+    mcp_binary: "D:/VisualStudioWrkSpce/2022/demo-mcp/GoogleSearchMcp/publish/GoogleSearchMcp.exe"
+    python_executable: "D:/VisualStudioCodeWrkSpce/LLMs/demo-desktop-agent/.venv/Scripts/python.exe"
+    session_launcher: ""
+    session_users: []
+    agent_base_port: 8000
+    mcp_base_port: 5000
+    host: "localhost"
+     
+
+  # future agent type example
+  # web:
+  #   warm_sessions: 2
+  #   max_sessions: 5
+  #   agent_script: "C:/agents/web_agent/main.py"
+  #   mcp_binary: "C:/agents/WebMcp/WebMcp.exe"
+  #   agent_base_port: 8100
+  #   mcp_base_port: 5100
+
+# Health check settings (shared across all agent types)
+health_check_interval_seconds: 30
+health_check_timeout_seconds: 5
+startup_timeout_seconds: 30
