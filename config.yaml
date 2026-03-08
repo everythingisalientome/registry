@@ -1,5 +1,6 @@
 agent_types:
   desktop:
+    session_mode: "local"        # "local" or "rdsh"
     warm_sessions: 3
     max_sessions: 10
     agent_script: "C:/agents/desktop_agent/desktop_agent.exe"
