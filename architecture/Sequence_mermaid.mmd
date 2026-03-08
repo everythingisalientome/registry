@@ -1,0 +1,48 @@
+sequenceDiagram
+    participant Client
+    participant Registry
+    participant SessionLauncher
+    participant DesktopAgent
+    participant MCPTool
+    participant RDSH as RDSH Session<br/>(agent_user_N)
+
+    Note over Registry: Startup
+    Registry->>SessionLauncher: --user agent_user_1 --exe GoogleSearchMcp.exe --args "--urls :5001"
+    SessionLauncher->>RDSH: CreateProcessAsUser (MCPTool)
+    Registry->>SessionLauncher: --user agent_user_1 --exe desktop_agent.exe --args "--port 8001 --mcp-url :5001"
+    SessionLauncher->>RDSH: CreateProcessAsUser (DesktopAgent)
+    Registry->>DesktopAgent: GET /health
+    DesktopAgent-->>Registry: 200 OK
+    Note over Registry: Slot 1 ready
+
+    Note over Client: Task Execution
+    Client->>Registry: GET /session/acquire?agent_type=desktop
+    Registry-->>Client: { agent_url: ":8001", slot: 1 }
+
+    Client->>DesktopAgent: POST /run { "task": "Open notepad and type Hello" }
+    DesktopAgent->>MCPTool: MCP initialize
+    MCPTool-->>DesktopAgent: session ID + capabilities
+    DesktopAgent->>MCPTool: tools/list
+    MCPTool-->>DesktopAgent: [open_notepad_and_type, google_search]
+    DesktopAgent->>DesktopAgent: LangGraph invokes tool
+    DesktopAgent->>MCPTool: open_notepad_and_type("Hello")
+    MCPTool->>RDSH: Launch Notepad
+    MCPTool->>RDSH: FlaUI attach + SendKeys
+    MCPTool->>RDSH: CopyFromScreen → base64 PNG
+    RDSH-->>MCPTool: screenshot base64
+    MCPTool-->>DesktopAgent: base64 PNG
+    DesktopAgent->>DesktopAgent: Extract screenshot from ToolMessage
+    DesktopAgent-->>Client: { result: "done", screenshot_base64: "..." }
+
+    Client->>Registry: POST /session/release/8001?agent_type=desktop
+    Registry-->>Client: { released: 8001 }
+    Note over Registry: Slot 1 marked available
+
+    Note over Registry: Health Check Loop (every 30s)
+    Registry->>DesktopAgent: GET /health
+    alt healthy
+        DesktopAgent-->>Registry: 200 OK
+    else unhealthy
+        Registry->>DesktopAgent: terminate
+        Registry->>SessionLauncher: relaunch slot
+    end

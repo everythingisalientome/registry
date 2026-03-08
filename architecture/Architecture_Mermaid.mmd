@@ -1,0 +1,45 @@
+graph TD
+    Client(["🖥️ Client / Caller"])
+
+    subgraph Registry["Registry :9000"]
+        SM["SessionManager"]
+        AP["AgentPool (desktop)"]
+        SM --> AP
+    end
+
+    subgraph Slot1["Slot 1 — agent_user_1"]
+        DA1["Desktop Agent :8001\nLangGraph + OpenAI"]
+        MCP1["MCP Tool Server :5001\ngoogle_search\nopen_notepad_and_type"]
+        WIN1["Windows RDSH Session\nagent_user_1\nNotepad + Screenshot"]
+        DA1 -->|"MCP HTTP"| MCP1
+        MCP1 -->|"FlaUI + SendKeys"| WIN1
+    end
+
+    subgraph Slot2["Slot 2 — agent_user_2"]
+        DA2["Desktop Agent :8002\nLangGraph + OpenAI"]
+        MCP2["MCP Tool Server :5002\ngoogle_search\nopen_notepad_and_type"]
+        WIN2["Windows RDSH Session\nagent_user_2\nNotepad + Screenshot"]
+        DA2 -->|"MCP HTTP"| MCP2
+        MCP2 -->|"FlaUI + SendKeys"| WIN2
+    end
+
+    subgraph Slot3["Slot 3 — agent_user_3"]
+        DA3["Desktop Agent :8003\nLangGraph + OpenAI"]
+        MCP3["MCP Tool Server :5003\ngoogle_search\nopen_notepad_and_type"]
+        WIN3["Windows RDSH Session\nagent_user_3\nNotepad + Screenshot"]
+        DA3 -->|"MCP HTTP"| MCP3
+        MCP3 -->|"FlaUI + SendKeys"| WIN3
+    end
+
+    SL["SessionLauncher.exe\nCreateProcessAsUser\nWTSQueryUserToken"]
+
+    Client -->|"GET /session/acquire"| Registry
+    Client -->|"POST /run"| DA1
+    Client -->|"POST /session/release"| Registry
+    AP -->|"launches"| SL
+    SL -->|"injects into session"| DA1
+    SL -->|"injects into session"| MCP1
+    SL -->|"injects into session"| DA2
+    SL -->|"injects into session"| MCP2
+    SL -->|"injects into session"| DA3
+    SL -->|"injects into session"| MCP3
