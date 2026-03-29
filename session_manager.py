@@ -12,58 +12,166 @@ logger = logging.getLogger(__name__)
 class AgentPool:
     """Manages sessions for a single agent type."""
 
-    def __init__(self, agent_type: str, config: dict, global_config: dict):
-        self.agent_type = agent_type
-        self.warm_count = config["warm_sessions"]
-        self.max_sessions = config["max_sessions"]
-        self.agent_base_port = config["agent_base_port"]
-        self.mcp_base_port = config["mcp_base_port"]
-        self.agent_script = config["agent_script"]
-        self.mcp_binary = config["mcp_binary"]
-        self.host = config.get("host", "localhost")
-        self.session_mode = config.get("session_mode", "local")
-        self.session_launcher = config.get("session_launcher", "")
-        self.session_users = config.get("session_users", [])
-        self.startup_timeout = global_config["startup_timeout_seconds"]
-        self.health_interval = global_config["health_check_interval_seconds"]
-        self.health_timeout = global_config["health_check_timeout_seconds"]
+    def __init__(self, agent_type: str, config: dict, global_config: dict,
+                 registry_host: str, session_service_url: str):
+        self.agent_type          = agent_type
+        self.warm_count          = config["warm_sessions"]   # fix: was min_sessions
+        self.max_sessions        = config["max_sessions"]
+        self.agent_base_port     = config["agent_base_port"]
+        self.mcp_base_port       = config["mcp_base_port"]
+        self.agent_script        = config["agent_script"]
+        self.mcp_binary          = config["mcp_binary"]
+        self.host                = registry_host
+        self.session_mode        = config.get("session_mode", "local")
+        self.session_service_url = session_service_url
+        self.startup_timeout     = global_config["startup_timeout_seconds"]
+        self.health_interval     = global_config["health_check_interval_seconds"]
+        self.health_timeout      = global_config["health_check_timeout_seconds"]
 
+        # local mode only
         self.sessions: dict[int, Session] = {}
         self._lock = asyncio.Lock()
 
     async def startup(self):
-        logger.info(f"[{self.agent_type}] Mode: {self.session_mode} — Starting {self.warm_count} warm sessions...")
-        for slot in range(1, self.warm_count + 1):
-            await self._launch_session(slot, SessionType.WARM)
-            await asyncio.sleep(5)
+        logger.info(f"[{self.agent_type}] Mode: {self.session_mode} — "
+                    f"Warming {self.warm_count} sessions...")
+
+        if self.session_mode == "rdsh":
+            await self._startup_rdsh()
+        else:
+            for slot in range(1, self.warm_count + 1):
+                await self._launch_local_session(slot, SessionType.WARM)
+                await asyncio.sleep(5)
+
         logger.info(f"[{self.agent_type}] All warm sessions ready.")
         asyncio.create_task(self._health_loop())
 
+    # ── RDSH mode ─────────────────────────────────────────────────────────────
+
+    async def _startup_rdsh(self):
+        """
+        Ask SessionService to inject agent + MCP into warm_count available sessions.
+        SessionService already has the RDP sessions running — we just request injection.
+        """
+        async with httpx.AsyncClient() as client:
+            for i in range(self.warm_count):
+                slot       = i + 1
+                agent_port = self.agent_base_port + slot
+                mcp_port   = self.mcp_base_port   + slot
+
+                logger.info(f"[{self.agent_type}] Requesting injection for slot {slot}...")
+
+                try:
+                    # Ask SessionService to inject agent + MCP into an available session
+                    resp = await client.post(
+                        f"{self.session_service_url}/sessions/inject-next",
+                        json={
+                            "agent_type":   self.agent_type,
+                            "agent_script": self.agent_script,
+                            "mcp_binary":   self.mcp_binary,
+                            "agent_port":   agent_port,
+                            "mcp_port":     mcp_port,
+                        },
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    logger.info(f"[{self.agent_type}] Slot {slot} injected into "
+                                f"Windows session {data.get('windows_session_id')}")
+
+                    # Wait for agent health
+                    await self._wait_for_agent_health(agent_port)
+                    logger.info(f"[{self.agent_type}] Slot {slot} healthy — "
+                                f"agent:{agent_port} mcp:{mcp_port}")
+
+                except Exception as e:
+                    logger.error(f"[{self.agent_type}] Failed to warm slot {slot}: {e}")
+
+                await asyncio.sleep(3)
+
     async def acquire(self) -> Session | None:
+        if self.session_mode == "rdsh":
+            return await self._acquire_rdsh()
+        else:
+            return await self._acquire_local()
+
+    async def _acquire_rdsh(self) -> Session | None:
+        """Ask SessionService for an available session."""
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.session_service_url}/sessions/available",
+                    params={"type": self.agent_type},
+                    timeout=10,
+                )
+                if resp.status_code == 503:
+                    logger.warning(f"[{self.agent_type}] No sessions available in SessionService")
+                    return None
+                resp.raise_for_status()
+                data = resp.json()
+
+                return Session(
+                    slot       = data["session_id"],
+                    agent_type = self.agent_type,
+                    host       = data["host"],
+                    agent_port = data["agent_port"],
+                    mcp_port   = data["mcp_port"],
+                    type       = SessionType.WARM,
+                    status     = SessionStatus.BUSY,
+                )
+            except Exception as e:
+                logger.error(f"[{self.agent_type}] acquire_rdsh failed: {e}")
+                return None
+
+    async def release(self, agent_port: int) -> bool:
+        if self.session_mode == "rdsh":
+            return await self._release_rdsh(agent_port)
+        else:
+            return await self._release_local(agent_port)
+
+    async def _release_rdsh(self, agent_port: int) -> bool:
+        """Tell SessionService to release the session and re-inject fresh agent."""
+        slot = agent_port - self.agent_base_port
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    f"{self.session_service_url}/sessions/{slot}/release",
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                logger.info(f"[{self.agent_type}] Released session slot {slot}")
+                return True
+            except Exception as e:
+                logger.error(f"[{self.agent_type}] release_rdsh failed: {e}")
+                return False
+
+    # ── Local mode (unchanged) ────────────────────────────────────────────────
+
+    async def _acquire_local(self) -> Session | None:
         async with self._lock:
             for session in self.sessions.values():
                 if session.status == SessionStatus.AVAILABLE:
                     session.status = SessionStatus.BUSY
-                    logger.info(f"[{self.agent_type}] Acquired slot {session.slot} on port {session.agent_port}")
+                    logger.info(f"[{self.agent_type}] Acquired slot {session.slot} "
+                                f"on port {session.agent_port}")
                     return session
 
             if len(self.sessions) < self.max_sessions:
                 slot = self._next_slot()
-                logger.info(f"[{self.agent_type}] No warm sessions available, spinning dynamic slot {slot}")
-                session = await self._launch_session(slot, SessionType.DYNAMIC)
+                logger.info(f"[{self.agent_type}] No warm sessions, spinning dynamic slot {slot}")
+                session = await self._launch_local_session(slot, SessionType.DYNAMIC)
                 if session and session.status == SessionStatus.AVAILABLE:
                     session.status = SessionStatus.BUSY
                     return session
 
-            logger.warning(f"[{self.agent_type}] Max session limit reached, no sessions available.")
+            logger.warning(f"[{self.agent_type}] Max session limit reached.")
             return None
 
-    async def release(self, agent_port: int) -> bool:
+    async def _release_local(self, agent_port: int) -> bool:
         async with self._lock:
             session = self._find_by_port(agent_port)
             if not session:
                 return False
-
             if session.type == SessionType.WARM:
                 session.status = SessionStatus.AVAILABLE
                 logger.info(f"[{self.agent_type}] Released warm slot {session.slot}")
@@ -71,36 +179,49 @@ class AgentPool:
                 await self._kill_session(session)
                 del self.sessions[session.slot]
                 logger.info(f"[{self.agent_type}] Torn down dynamic slot {session.slot}")
-
             return True
 
-    def status(self) -> list[dict]:
-        return [s.to_dict() for s in self.sessions.values()]
-
-    async def _launch_session(self, slot: int, session_type: SessionType) -> Session | None:
+    async def _launch_local_session(self, slot: int,
+                                     session_type: SessionType) -> Session | None:
         agent_port = self.agent_base_port + slot
-        mcp_port = self.mcp_base_port + slot
+        mcp_port   = self.mcp_base_port   + slot
+        agent_dir  = os.path.dirname(os.path.abspath(self.agent_script))
 
         session = Session(
-            slot=slot,
-            agent_type=self.agent_type,
-            host=self.host,
-            agent_port=agent_port,
-            mcp_port=mcp_port,
-            type=session_type,
-            status=SessionStatus.STARTING,
+            slot       = slot,
+            agent_type = self.agent_type,
+            host       = self.host,
+            agent_port = agent_port,
+            mcp_port   = mcp_port,
+            type       = session_type,
+            status     = SessionStatus.STARTING,
         )
         self.sessions[slot] = session
 
         try:
-            if self.session_mode == "rdsh":
-                await self._launch_rdsh(slot, agent_port, mcp_port)
-            else:
-                await self._launch_local(session, agent_port, mcp_port)
+            session.mcp_process = subprocess.Popen(
+                [self.mcp_binary, "--urls", f"http://localhost:{mcp_port}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
-            await self._wait_for_health(session)
+            env        = {**os.environ, "MCP_URL": f"http://localhost:{mcp_port}"}
+            stderr_log = open(
+                os.path.join(agent_dir, f"agent_stderr_{agent_port}.log"), "w")
+
+            session.agent_process = subprocess.Popen(
+                [self.agent_script, "--port", str(agent_port),
+                 "--mcp-url", f"http://localhost:{mcp_port}"],
+                cwd    = agent_dir,
+                env    = env,
+                stdout = subprocess.DEVNULL,
+                stderr = stderr_log,
+            )
+
+            await self._wait_for_agent_health(agent_port)
             session.status = SessionStatus.AVAILABLE
-            logger.info(f"[{self.agent_type}] Slot {slot} ready — agent:{agent_port} mcp:{mcp_port}")
+            logger.info(f"[{self.agent_type}] Slot {slot} ready — "
+                        f"agent:{agent_port} mcp:{mcp_port}")
             return session
 
         except Exception as e:
@@ -108,69 +229,19 @@ class AgentPool:
             session.status = SessionStatus.DEAD
             return None
 
-    async def _launch_local(self, session: Session, agent_port: int, mcp_port: int):
-        """Launch agent and MCP directly via Popen — visible on current desktop."""
-        agent_dir = os.path.dirname(os.path.abspath(self.agent_script))
-
-        session.mcp_process = subprocess.Popen(
-            [self.mcp_binary, "--urls", f"http://localhost:{mcp_port}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info(f"[{self.agent_type}] MCP launched locally on port {mcp_port}")
-
-        env = {
-            **os.environ,
-            "MCP_URL": f"http://localhost:{mcp_port}",
-        }
-        agent_log_dir = os.path.dirname(os.path.abspath(self.agent_script))
-        stderr_log = open(os.path.join(agent_log_dir, f"agent_stderr_{agent_port}.log"), "w")
-        #stdout_log = open(os.path.join(agent_log_dir, f"agent_stdout_{agent_port}.log"), "w")
-        session.agent_process = subprocess.Popen(
-            [self.agent_script, "--port", str(agent_port), "--mcp-url", f"http://localhost:{mcp_port}"],
-            cwd=agent_dir,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_log,
-        )
-        logger.info(f"[{self.agent_type}] Agent launched locally on port {agent_port}")
-
-    async def _launch_rdsh(self, slot: int, agent_port: int, mcp_port: int):
-        """Launch agent and MCP in isolated RDSH user session via SessionLauncher."""
-        username = self.session_users[(slot - 1) % len(self.session_users)]
-        logger.info(f"[{self.agent_type}] Launching slot {slot} in RDSH session for user {username}")
-
-        subprocess.Popen([
-            self.session_launcher,
-            "--user", username,
-            "--exe", self.mcp_binary,
-            "--args", f"--urls http://localhost:{mcp_port}"
-        ])
-        logger.info(f"[{self.agent_type}] MCP launched via SessionLauncher for {username} on port {mcp_port}")
-
-        subprocess.Popen([
-            self.session_launcher,
-            "--user", username,
-            "--exe", self.agent_script,
-            "--args", f"--port {agent_port} --mcp-url http://localhost:{mcp_port}"
-        ])
-        logger.info(f"[{self.agent_type}] Agent launched via SessionLauncher for {username} on port {agent_port}")
-
-    async def _wait_for_health(self, session: Session):
-        deadline = asyncio.get_event_loop().time() + self.startup_timeout
-        # Always health check via localhost — agent runs on same machine
-        health_url = f"http://localhost:{session.agent_port}/health"
+    async def _wait_for_agent_health(self, agent_port: int):
+        deadline    = asyncio.get_event_loop().time() + self.startup_timeout
+        health_url  = f"http://localhost:{agent_port}/health"
         async with httpx.AsyncClient() as client:
             while asyncio.get_event_loop().time() < deadline:
                 try:
                     r = await client.get(health_url, timeout=2)
                     if r.status_code == 200:
                         return
-                except Exception as e:
-                    logger.error(f"[{self.agent_type}] Health check failed for slot {session.slot} on port {session.agent_port}: {e}")
+                except Exception:
                     pass
                 await asyncio.sleep(1)
-        raise TimeoutError(f"[{self.agent_type}] Slot {session.slot} did not become healthy in time.")
+        raise TimeoutError(f"Agent on port {agent_port} did not become healthy in time.")
 
     async def _kill_session(self, session: Session):
         for proc in [session.agent_process, session.mcp_process]:
@@ -185,21 +256,29 @@ class AgentPool:
         async with httpx.AsyncClient() as client:
             while True:
                 await asyncio.sleep(self.health_interval)
+
+                if self.session_mode == "rdsh":
+                    # SessionService owns health monitoring for rdsh sessions
+                    continue
+
                 for session in list(self.sessions.values()):
                     if session.status == SessionStatus.BUSY:
                         continue
                     try:
                         r = await client.get(
-                            f"{session.agent_url}/health",
-                            timeout=self.health_timeout
+                            f"http://localhost:{session.agent_port}/health",
+                            timeout=self.health_timeout,
                         )
                         if r.status_code != 200:
                             raise Exception("Bad status")
                     except Exception as e:
-                        logger.error(f"[{self.agent_type}] Health check failed for slot {session.slot} on port {session.agent_port}: {e}")
-                        logger.warning(f"[{self.agent_type}] Slot {session.slot} is dead, restarting...")
+                        logger.warning(f"[{self.agent_type}] Slot {session.slot} "
+                                       f"is dead ({e}), restarting...")
                         await self._kill_session(session)
-                        await self._launch_session(session.slot, session.type)
+                        await self._launch_local_session(session.slot, session.type)
+
+    def status(self) -> list[dict]:
+        return [s.to_dict() for s in self.sessions.values()]
 
     def _next_slot(self) -> int:
         used = set(self.sessions.keys())
@@ -224,12 +303,20 @@ class SessionManager:
 
         global_config = {
             "health_check_interval_seconds": config["health_check_interval_seconds"],
-            "health_check_timeout_seconds": config["health_check_timeout_seconds"],
-            "startup_timeout_seconds": config["startup_timeout_seconds"],
+            "health_check_timeout_seconds":  config["health_check_timeout_seconds"],
+            "startup_timeout_seconds":       config["startup_timeout_seconds"],
         }
 
+        registry_host        = config.get("registry", {}).get("host", "localhost")
+        ss_host              = config.get("session_service", {}).get("host", "localhost")
+        ss_port              = config.get("session_service", {}).get("port", 9001)
+        session_service_url  = f"http://{ss_host}:{ss_port}"
+
         self.pools: dict[str, AgentPool] = {
-            agent_type: AgentPool(agent_type, agent_config, global_config)
+            agent_type: AgentPool(
+                agent_type, agent_config, global_config,
+                registry_host, session_service_url,
+            )
             for agent_type, agent_config in config["agent_types"].items()
         }
 

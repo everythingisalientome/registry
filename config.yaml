@@ -1,19 +1,28 @@
+# ── Registry ──────────────────────────────────────────────────────────────────
+registry:
+  host: "192.168.0.22"          # external IP returned to clients
+  port: 9000
+
+# ── SessionService connection ─────────────────────────────────────────────────
+# Only used when session_mode is "rdsh"
+session_service:
+  host: "localhost"               # always localhost — same machine as registry
+  port: 9001
+
+# ── Agent types ───────────────────────────────────────────────────────────────
 agent_types:
   desktop:
     session_mode: "local"        # "local" or "rdsh"
-    warm_sessions: 3
-    max_sessions: 10
+    warm_sessions: 2
+    max_sessions: 3
     agent_script: "C:/agents/desktop_agent/desktop_agent.exe"
     mcp_binary: "C:/agents/GoogleSearchMcp/GoogleSearchMcp.exe"
-    session_launcher: "C:/agents/SessionLauncher/launcher/SessionLauncher.exe"
-    session_users:
-      - "agent_user_1"
-      - "agent_user_2"
-      - "agent_user_3"
+    #session_launcher: "C:/agents/SessionLauncher/launcher/SessionLauncher.exe"
     agent_base_port: 8000
     mcp_base_port: 5000
-    host: "192.168.0.135"
+    profile_warmup_apps: []       # e.g. ["C:/Program Files/SSMS/ssms.exe"]
 
+# ── Health checks ─────────────────────────────────────────────────────────────
 health_check_interval_seconds: 30
 health_check_timeout_seconds: 5
 startup_timeout_seconds: 30

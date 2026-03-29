@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find . -type f -name *.md -o -name *.json -o -name *.toml -o -name *.py -o -name *.txt -o -name .env* -o -name .cursorrules)",
+      "Bash(find D:/VisualStudioCodeWrkSpce/LLMs/registry -maxdepth 2 -type f \\\\\\(-name *.md -o -name *.yaml -o -name *.yml -o -name *.py -o -name *.txt -o -name .env* -o -name *.json -o -name *.spec \\\\\\) ! -path ./.venv/* ! -path */__pycache__/* ! -path */.git/*)"
+    ]
+  }
+}
